@@ -98,6 +98,8 @@ function init() {
     });
     if (inventoryGrid) {
         Object.keys(blockTypes).forEach(blockId => {
+            // NEW: Skip bedrock when populating the inventory
+            if (blockId === 'bedrock') return;
             const slot = document.createElement('div');
             slot.classList.add('slot');
             slot.dataset.blockId = blockId;
