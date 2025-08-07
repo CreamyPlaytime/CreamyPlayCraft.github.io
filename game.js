@@ -3,7 +3,7 @@ const blocks = new Map();
 const allBlocks = [];
 const blockSize = 1;
 const playerHeight = 1.8;
-const playerRadius = 0.4;
+const playerRadius = 0.2;
 const moveSpeed = 5.0;
 const velocity = new THREE.Vector3();
 const direction = new THREE.Vector3();
@@ -264,7 +264,7 @@ function addBlock(x, y, z, blockId, isInitialLoad = false, doorState = 'closed',
         const doorGroup = new THREE.Group();
         doorGroup.position.set(x * blockSize, y * blockSize, z * blockSize);
         const doorMaterial = materials.door_wood.clone();
-        const doorGeometry = new THREE.BoxGeometry(blockSize, blockSize, blockSize * 0.2);
+        const doorGeometry = new THREE.BoxGeometry(blockSize, blockSize, blockSize * 0.1);
         let initialRotationY = 0;
         let hingeOffset = -blockSize / 2;
         if (!isInitialLoad) {
