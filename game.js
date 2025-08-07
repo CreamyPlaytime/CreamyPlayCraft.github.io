@@ -320,11 +320,15 @@ function addBlock(x, y, z, blockId, isInitialLoad = false, doorState = 'closed',
         materialToUse = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createWoodGrainTexture('#5c4033', '#4a332a')) });
     } else if (blockId === 'glass') {
         materialToUse = new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#87ceeb', ['#8ed1ef', '#83c9e6'])), transparent: true, opacity: 0.75 });
+    } else if (blockId === 'leaves') {
+        // Updated to use the correct canvas texture
+        materialToUse = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#228b22', ['#1e781e', '#29a029'])), transparent: true, opacity: 0.8 });
+    } else if (blockId === 'leaves_all_sides') {
+        // New blockId to handle leaves
+        materialToUse = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#228b22', ['#1e781e', '#29a029'])), transparent: true, opacity: 0.8 });
     } else if (blockId === 'sponge') {
-        // Correctly apply the canvas texture for the sponge.
         materialToUse = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#FFEC8B', ['#FFD700', '#B8860B'])) });
     } else if (blockId === 'door') {
-        // Correctly apply the canvas texture for the door.
         materialToUse = materials.door_wood;
     } else {
         materialToUse = materials[blockId];
@@ -554,27 +558,20 @@ function createFloor() {
 }
 function animate() {
     requestAnimationFrame(animate);
-
     if (!isInventoryOpen) {
         processBlockUpdates();
     }
-
     if (isControllerConnected) {
         handleGamepadInput();
     }
-
     const delta = clock.getDelta();
-
     if (isPlaying) {
-        // --- Water Physics Logic ---
         let isInWater = false;
         let playerWaterBox = new THREE.Box3().setFromCenterAndSize(
             camera.position,
             new THREE.Vector3(playerRadius, playerHeight, playerRadius)
         );
-
         for (const b of allBlocks) {
-            // Check for intersection with water blocks only
             if (b.userData.blockId === 'water') {
                 const blockBox = new THREE.Box3().setFromObject(b);
                 if (playerWaterBox.intersectsBox(blockBox)) {
@@ -583,53 +580,38 @@ function animate() {
                 }
             }
         }
-
         let currentGravity = gravity;
         let currentMoveSpeed = moveSpeed;
-
         if (isInWater) {
-            currentGravity = -0.002; // Reduced gravity for floating
-            currentMoveSpeed = moveSpeed * 0.5; // Halved speed for swimming
-            
-            // If the player presses the jump button (canJump is true) or is generally moving up,
-            // we give an upward velocity.
-            if (canJump || velocity.y > 0) { 
-                velocity.y = 0.05; 
+            currentGravity = -0.002;
+            currentMoveSpeed = moveSpeed * 0.5;
+            if (canJump || velocity.y > 0) {
+                velocity.y = 0.05;
             } else {
-                // Otherwise, simulate buoyancy, but don't force a rise from the bottom
-                velocity.y += 0.005; 
+                velocity.y += 0.005;
             }
         }
-
-        // Horizontal movement
         const horizontalMovement = new THREE.Vector3();
         if (moveForward) horizontalMovement.z -= 1;
         if (moveBackward) horizontalMovement.z += 1;
         if (moveLeft) horizontalMovement.x -= 1;
         if (moveRight) horizontalMovement.x += 1;
-        
         if (horizontalMovement.length() > 0) {
             horizontalMovement.normalize().multiplyScalar(currentMoveSpeed * delta);
             const forwardVector = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
             const rightVector = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-
             const desiredDeltaX = (forwardVector.x * -horizontalMovement.z) + (rightVector.x * horizontalMovement.x);
             const desiredDeltaZ = (forwardVector.z * -horizontalMovement.z) + (rightVector.z * horizontalMovement.x);
-
             const newPositionX = camera.position.x + desiredDeltaX;
             const newPositionZ = camera.position.z + desiredDeltaZ;
-
             const playerBox = new THREE.Box3().setFromCenterAndSize(
                 new THREE.Vector3(newPositionX, camera.position.y, newPositionZ),
                 new THREE.Vector3(playerRadius * 2, playerHeight, playerRadius * 2)
             );
-
             let canMoveX = true;
             let canMoveZ = true;
-
             for (const b of allBlocks) {
                 const collisionMesh = b instanceof THREE.Group ? b.children.find(c => c.userData.isCollisionBlockPart) || b.children[0] : b;
-                // Exclude water blocks from collision check
                 if (!collisionMesh || !b.userData.isCollisionBlock || b.userData.blockId === 'water') continue;
                 const blockBox = new THREE.Box3().setFromObject(collisionMesh).expandByScalar(-0.01);
                 if (blockBox.max.y > camera.position.y - playerHeight / 2 + 0.1) {
@@ -640,28 +622,21 @@ function animate() {
                      }
                 }
             }
-
             if (canMoveX) camera.position.x = newPositionX;
             if (canMoveZ) camera.position.z = newPositionZ;
         }
-
-        // Vertical movement and collision
         velocity.y += currentGravity;
         let futurePositionY = camera.position.y + velocity.y;
         let verticalCollision = false;
         let lowestCollisionY = -Infinity;
         let isSponge = false;
-        
         const playerVerticalBox = new THREE.Box3().setFromCenterAndSize(new THREE.Vector3(camera.position.x, futurePositionY, camera.position.z), new THREE.Vector3(playerRadius * 2, playerHeight, playerRadius * 2));
-        
         for (const b of allBlocks) {
             const isBlockCollision = b.userData.isCollisionBlock;
-            // Exclude water blocks from vertical collision check
             if (!isBlockCollision || b.userData.blockId === 'water') continue;
             const collisionMesh = b instanceof THREE.Group ? b.children.find(c => c.userData.isCollisionBlockPart) || b.children[0] : b;
             if (!collisionMesh) continue;
             const blockBox = new THREE.Box3().setFromObject(collisionMesh).expandByScalar(-0.01);
-
             if (playerVerticalBox.intersectsBox(blockBox)) {
                 if (velocity.y < 0 && blockBox.max.y > lowestCollisionY) {
                     lowestCollisionY = blockBox.max.y;
@@ -670,7 +645,6 @@ function animate() {
                 verticalCollision = true;
             }
         }
-
         if (verticalCollision) {
             if (velocity.y < 0) {
                 camera.position.y = lowestCollisionY + playerHeight / 2;
@@ -687,15 +661,12 @@ function animate() {
             camera.position.y = futurePositionY;
             canJump = false;
         }
-
-        // Keep the player from falling through the floor of the world
         if (camera.position.y < playerHeight / 2) {
             camera.position.y = playerHeight / 2;
             velocity.y = 0;
             canJump = true;
         }
     }
-
     renderer.render(scene, camera);
 }
 function initDragAndDrop() {
@@ -830,7 +801,6 @@ function handleGamepadInput() {
     }
     xPressedLastFrame = xButtonPressed;
 }
-// New function to handle both interaction and placing blocks
 function interactOrPlaceBlock() {
     raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
     const intersects = raycaster.intersectObjects(allBlocks, true);
@@ -987,6 +957,8 @@ function createPlayerArm() {
     let initialMaterial = materials[selectedBlockId] || materials.dirt;
     if (selectedBlockId === 'door') {
         initialMaterial = materials.door_wood;
+    } else if (selectedBlockId === 'leaves' || selectedBlockId === 'leaves_all_sides') {
+        initialMaterial = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#228b22', ['#1e781e', '#29a029'])), transparent: true, opacity: 0.8 });
     }
     if (heldBlock) { heldBlock.material = initialMaterial; }
     if (!heldBlock) {
@@ -1175,10 +1147,15 @@ function selectBlock(slotElement) {
         previewMaterial = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#8b4513', ['#9c5726', '#6b3510'])) });
     } else if (selectedBlockId === 'glass') {
         previewMaterial = new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#87ceeb', ['#8ed1ef', '#83c9e6'])), transparent: true, opacity: 0.75 });
+    } else if (selectedBlockId === 'leaves') {
+        // Updated to use the correct canvas texture for preview
+        previewMaterial = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#228b22', ['#1e781e', '#29a029'])), transparent: true, opacity: 0.8 });
+    } else if (selectedBlockId === 'leaves_all_sides') {
+        // New blockId to handle leaves
+        previewMaterial = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#228b22', ['#1e781e', '#29a029'])), transparent: true, opacity: 0.8 });
     } else if (selectedBlockId === 'door') {
         previewMaterial = materials.door_wood;
-    }
-    else {
+    } else {
         previewMaterial = materials[selectedBlockId] || materials.dirt;
     }
     if (heldBlock) { heldBlock.material = previewMaterial; }
