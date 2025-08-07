@@ -20,6 +20,7 @@ let selectedBlockId = hotbarSlots[0].dataset.blockId;
 const clock = new THREE.Clock();
 let raycaster;
 let playerArm;
+let heldBlock;
 let isInventoryOpen = false;
 document.getElementById('save-world-btn').addEventListener('click', saveWorld);
 document.getElementById('load-world-btn').addEventListener('click', loadWorld);
@@ -37,7 +38,9 @@ const controllerSensitivity = 0.04;
 const joystickDeadzone = 0.1;
 let ltPressedLastFrame = false;
 let rtPressedLastFrame = false;
-// --- NEW DEBOUNCE FUNCTION ---
+let xPressedLastFrame = false;
+let ePressedLastFrame = false;
+const doorInteractionDelay = 200;
 function debounce(func, delay) {
     let timeout;
     return function(...args) {
@@ -46,12 +49,10 @@ function debounce(func, delay) {
         timeout = setTimeout(() => func.apply(context, args), delay);
     };
 }
-// --- NEW DEBOUNCED TOGGLE INVENTORY FUNCTION ---
 const debouncedToggleInventory = debounce(toggleInventory, 200);
-// --- UPDATE EVENT LISTENERS TO USE DEBOUNCE FUNCTION ---
+const debouncedToggleDoor = debounce(toggleDoor, doorInteractionDelay);
 document.getElementById('inventory-btn-menu').addEventListener('click', debouncedToggleInventory);
 document.getElementById('inventory-btn-game').addEventListener('click', debouncedToggleInventory);
-// NEW: Conditionally add touch listeners
 if (isTouchDevice) {
     document.getElementById('inventory-btn-menu').addEventListener('touchstart', (event) => { event.stopPropagation(); debouncedToggleInventory(); });
     document.getElementById('inventory-btn-game').addEventListener('touchstart', (event) => { event.stopPropagation(); debouncedToggleInventory(); });
@@ -98,7 +99,6 @@ function init() {
     });
     if (inventoryGrid) {
         Object.keys(blockTypes).forEach(blockId => {
-            // NEW: Skip bedrock when populating the inventory
             if (blockId === 'bedrock') return;
             const slot = document.createElement('div');
             slot.classList.add('slot');
@@ -125,17 +125,17 @@ function init() {
         document.getElementById('touch-info').style.display = 'none';
         inGameUIElement.style.display = 'none';
         controls = new THREE.PointerLockControls(camera, document.body);
-    controls.addEventListener('lock', () => {
-        infoElement.style.display = 'none';
-        if (isTouchDevice) inGameUIElement.style.display = 'flex';
-        canJump = true;
-        isPlaying = true;
-    });
-    controls.addEventListener('unlock', () => {
-        infoElement.style.display = 'block';
-        if (isTouchDevice) inGameUIElement.style.display = 'none';
-        isPlaying = false;
-    });
+        controls.addEventListener('lock', () => {
+            infoElement.style.display = 'none';
+            if (isTouchDevice) inGameUIElement.style.display = 'flex';
+            canJump = true;
+            isPlaying = true;
+        });
+        controls.addEventListener('unlock', () => {
+            infoElement.style.display = 'block';
+            if (isTouchDevice) inGameUIElement.style.display = 'none';
+            isPlaying = false;
+        });
         document.addEventListener('click', () => { if (!controls.isLocked) controls.lock(); }, false);
     }
     raycaster = new THREE.Raycaster();
@@ -188,21 +188,18 @@ function init() {
         });
     }
 }
-// Function to toggle the inventory, now with better logic for mobile.
 function toggleInventory() {
     isInventoryOpen = !isInventoryOpen;
     document.getElementById('inventory-ui').style.display = isInventoryOpen ? 'block' : 'none';
     if (isInventoryOpen) {
         isPlaying = false;
         if (controls && controls.isLocked) { controls.unlock(); }
-        // Hide touch controls when inventory is open on mobile
         if (isTouchDevice) {
             document.getElementById('touch-controls').style.display = 'none';
         }
     } else {
         isPlaying = true;
         if (controls && !controls.isLocked) { controls.lock(); }
-        // Show appropriate UI based on device when inventory is closed
         if (isTouchDevice) {
             document.getElementById('touch-controls').style.display = 'flex';
         }
@@ -211,22 +208,24 @@ function toggleInventory() {
 function createGrassBlock(x, y, z) {
     const group = new THREE.Group();
     group.position.set(x * blockSize, y * blockSize, z * blockSize);
+    const dirtMaterial = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#8b4513', ['#9c5726', '#6b3510'])) });
     const dirtGeometry = new THREE.BoxGeometry(blockSize, blockSize, blockSize);
-    const dirtMesh = new THREE.Mesh(dirtGeometry, materials.dirt);
+    const dirtMesh = new THREE.Mesh(dirtGeometry, dirtMaterial);
     dirtMesh.userData.isCollisionBlock = true;
     group.add(dirtMesh);
+    const grassTopMaterial = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#38761d', ['#4a8e32', '#2e6315'])) });
     const grassTopGeometry = new THREE.BoxGeometry(blockSize + 0.01, blockSize * 0.1, blockSize + 0.01);
-    const grassTopMesh = new THREE.Mesh(grassTopGeometry, materials.grass);
+    const grassTopMesh = new THREE.Mesh(grassTopGeometry, grassTopMaterial);
     grassTopMesh.position.y = blockSize * 0.505;
     grassTopMesh.userData.isCollisionBlock = false;
     group.add(grassTopMesh);
     group.userData.blockId = 'grass_dirt';
+    group.userData.isCollisionBlock = true;
     scene.add(group);
     blocks.set(`${x},${y},${z}`, group);
     allBlocks.push(group);
 }
-function addBlock(x, y, z, blockId) {
-    // NEW: Check if we are trying to add a block at or below bedrock level
+function addBlock(x, y, z, blockId, isInitialLoad = false, doorState = 'closed', doorHinge = null) {
     const bedrockLevel = -3;
     if (blockId === 'water' && y <= bedrockLevel) {
         console.log('Cannot place water at or below bedrock level.');
@@ -235,20 +234,20 @@ function addBlock(x, y, z, blockId) {
     const key = `${x},${y},${z}`;
     const existingBlock = blocks.get(key);
     if (existingBlock && existingBlock.userData.blockId === 'water' && blockId === 'water') {
-        if(existingBlock.userData.fluidVolume < 1.0) {
+        if (existingBlock.userData.fluidVolume < 1.0) {
             existingBlock.userData.fluidVolume = 1.0;
             existingBlock.scale.y = existingBlock.userData.fluidVolume;
             existingBlock.position.y = (y * blockSize) + (blockSize * existingBlock.userData.fluidVolume) / 2 - blockSize * 0.5;
             existingBlock.material.opacity = 0.7 + existingBlock.userData.fluidVolume * 0.3;
             existingBlock.userData.isWaterSource = true;
-            blockUpdateQueue.push({x, y, z});
+            if (!isInitialLoad) blockUpdateQueue.push({ x, y, z });
         }
         return;
     }
     if (blocks.has(key)) {
         if (blockId !== 'water' && existingBlock.userData.blockId === 'water') {
             removeBlock(x, y, z);
-            addBlock(x, y, z, blockId);
+            addBlock(x, y, z, blockId, isInitialLoad);
         }
         return;
     }
@@ -256,7 +255,80 @@ function addBlock(x, y, z, blockId) {
         createGrassBlock(x, y, z);
         return;
     }
-    let materialToUse = blockTypes[blockId];
+    if (blockId === 'door') {
+        const topBlockKey = `${x},${y + 1},${z}`;
+        if (blocks.has(topBlockKey)) {
+            console.warn(`Cannot place door: space above (${x},${y+1},${z}) is occupied.`);
+            return;
+        }
+        const doorGroup = new THREE.Group();
+        doorGroup.position.set(x * blockSize, y * blockSize, z * blockSize);
+        const doorMaterial = materials.door_wood.clone();
+        const doorGeometry = new THREE.BoxGeometry(blockSize, blockSize, blockSize * 0.2);
+        let initialRotationY = 0;
+        let hingeOffset = -blockSize / 2;
+        if (!isInitialLoad) {
+            const playerDirection = new THREE.Vector3();
+            camera.getWorldDirection(playerDirection);
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            const intersects = raycaster.intersectObjects(allBlocks, true);
+            let normal;
+            if (intersects.length > 0) {
+                normal = intersects[0].face.normal;
+                if (Math.abs(normal.x) > Math.abs(normal.z)) {
+                    doorHinge = (normal.x > 0) ? 'east' : 'west';
+                    initialRotationY = (normal.x > 0) ? -Math.PI / 2 : Math.PI / 2;
+                } else {
+                    doorHinge = (normal.z > 0) ? 'south' : 'north';
+                    initialRotationY = (normal.z > 0) ? 0 : Math.PI;
+                }
+            }
+        } else {
+            if (doorHinge) {
+                if (doorHinge === 'north') initialRotationY = Math.PI;
+                if (doorHinge === 'south') initialRotationY = 0;
+                if (doorHinge === 'east') initialRotationY = -Math.PI / 2;
+                if (doorHinge === 'west') initialRotationY = Math.PI / 2;
+            }
+        }
+        doorGroup.rotation.y = initialRotationY;
+        const bottomDoorMesh = new THREE.Mesh(doorGeometry, doorMaterial);
+        bottomDoorMesh.position.set(0, 0, hingeOffset + (blockSize * 0.1));
+        bottomDoorMesh.userData.isCollisionBlockPart = true;
+        doorGroup.add(bottomDoorMesh);
+        const topDoorMesh = new THREE.Mesh(doorGeometry, doorMaterial);
+        topDoorMesh.position.set(0, blockSize, hingeOffset + (blockSize * 0.1));
+        topDoorMesh.userData.isCollisionBlockPart = true;
+        doorGroup.add(topDoorMesh);
+        doorGroup.userData.blockId = 'door';
+        doorGroup.userData.isCollisionBlock = true;
+        doorGroup.userData.doorState = 'closed';
+        doorGroup.userData.originalX = x;
+        doorGroup.userData.originalY = y;
+        doorGroup.userData.originalZ = z;
+        doorGroup.userData.hinge = doorHinge;
+        scene.add(doorGroup);
+        blocks.set(key, doorGroup);
+        blocks.set(topBlockKey, doorGroup);
+        allBlocks.push(doorGroup);
+        return;
+    }
+    let materialToUse = null;
+    if (blockId === 'dirt') {
+        materialToUse = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#8b4513', ['#9c5726', '#6b3510'])) });
+    } else if (blockId === 'wood') {
+        materialToUse = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createWoodGrainTexture('#5c4033', '#4a332a')) });
+    } else if (blockId === 'glass') {
+        materialToUse = new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#87ceeb', ['#8ed1ef', '#83c9e6'])), transparent: true, opacity: 0.75 });
+    } else if (blockId === 'sponge') {
+        // Correctly apply the canvas texture for the sponge.
+        materialToUse = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#FFEC8B', ['#FFD700', '#B8860B'])) });
+    } else if (blockId === 'door') {
+        // Correctly apply the canvas texture for the door.
+        materialToUse = materials.door_wood;
+    } else {
+        materialToUse = materials[blockId];
+    }
     if (!materialToUse) {
         console.warn(`Unknown block ID: ${blockId}`);
         return;
@@ -265,15 +337,16 @@ function addBlock(x, y, z, blockId) {
     const mesh = new THREE.Mesh(geometry, materialToUse);
     mesh.position.set(x * blockSize, y * blockSize, z * blockSize);
     mesh.userData.blockId = blockId;
+    mesh.userData.isCollisionBlock = true;
     if (blockId === 'water') {
         mesh.userData.fluidVolume = 1.0;
         mesh.userData.isWaterSource = true;
         mesh.userData.waterSpreadLimit = 1;
         mesh.material = new THREE.MeshBasicMaterial({ color: 0x4682b4, transparent: true, opacity: 0.8 });
-        blockUpdateQueue.push({x, y, z});
+        if (!isInitialLoad) blockUpdateQueue.push({ x, y, z });
     }
     if (blockId === 'sponge') {
-        blockUpdateQueue.push({x, y, z});
+        if (!isInitialLoad) blockUpdateQueue.push({ x, y, z });
     }
     scene.add(mesh);
     blocks.set(key, mesh);
@@ -284,17 +357,83 @@ function removeBlock(x, y, z) {
     const block = blocks.get(key);
     if (block) {
         if (block.userData.blockId === 'bedrock') return;
+        if (block.userData.blockId && (block.userData.blockId === 'door')) {
+            const originalY = block.userData.originalY;
+            const bottomKey = `${block.userData.originalX},${originalY},${block.userData.originalZ}`;
+            const topKey = `${block.userData.originalX},${originalY + 1},${block.userData.originalZ}`;
+            scene.remove(block);
+            blocks.delete(bottomKey);
+            blocks.delete(topKey);
+            const index = allBlocks.indexOf(block);
+            if (index > -1) {
+                allBlocks.splice(index, 1);
+            }
+            const neighbors = [{ x: x + 1, y: y, z: z }, { x: x - 1, y: y, z: z }, { x: x, y: y + 1, z: z }, { x: x, y: y - 1, z: z }, { x: x, y: y, z: z + 1 }, { x: x, y: y, z: z - 1 }];
+            neighbors.forEach(n => blockUpdateQueue.push(n));
+            return;
+        }
         scene.remove(block);
         blocks.delete(key);
         const index = allBlocks.indexOf(block);
-        if (index > -1) { allBlocks.splice(index, 1); }
-        const neighbors = [{x:x+1,y:y,z:z}, {x:x-1,y:y,z:z}, {x:x,y:y+1,z:z}, {x:x,y:y-1,z:z}, {x:x,y:y,z:z+1}, {x:x,y:y,z:z-1}];
+        if (index > -1) {
+            allBlocks.splice(index, 1);
+        }
+        const neighbors = [{ x: x + 1, y: y, z: z }, { x: x - 1, y: y, z: z }, { x: x, y: y + 1, z: z }, { x: x, y: y - 1, z: z }, { x: x, y: y, z: z + 1 }, { x: x, y: y, z: z - 1 }];
         neighbors.forEach(n => blockUpdateQueue.push(n));
+    }
+}
+function toggleDoor(x, y, z) {
+    const key = `${x},${y},${z}`;
+    const doorGroup = blocks.get(key);
+    if (doorGroup && doorGroup.userData.blockId === 'door') {
+        const currentState = doorGroup.userData.doorState;
+        const targetState = currentState === 'closed' ? 'open' : 'closed';
+        let targetRotationY = 0;
+        let hingeSide = doorGroup.userData.hinge;
+        if (targetState === 'open') {
+            const playerPos = camera.position;
+            const doorPos = doorGroup.position;
+            const dx = playerPos.x - doorPos.x;
+            const dz = playerPos.z - doorPos.z;
+            if (hingeSide === 'north') {
+                targetRotationY = (dx > 0) ? doorGroup.rotation.y - Math.PI / 2 : doorGroup.rotation.y + Math.PI / 2;
+            } else if (hingeSide === 'south') {
+                targetRotationY = (dx > 0) ? doorGroup.rotation.y + Math.PI / 2 : doorGroup.rotation.y - Math.PI / 2;
+            } else if (hingeSide === 'east') {
+                targetRotationY = (dz > 0) ? doorGroup.rotation.y + Math.PI / 2 : doorGroup.rotation.y - Math.PI / 2;
+            } else if (hingeSide === 'west') {
+                targetRotationY = (dz > 0) ? doorGroup.rotation.y - Math.PI / 2 : doorGroup.rotation.y + Math.PI / 2;
+            }
+        } else {
+             if (hingeSide === 'north') {
+                targetRotationY = Math.PI;
+            } else if (hingeSide === 'south') {
+                targetRotationY = 0;
+            } else if (hingeSide === 'east') {
+                targetRotationY = -Math.PI / 2;
+            } else { // 'west'
+                targetRotationY = Math.PI / 2;
+            }
+        }
+        const duration = 150;
+        const startTime = performance.now();
+        const initialRotationY = doorGroup.rotation.y;
+        function animateDoor() {
+            const elapsed = performance.now() - startTime;
+            const progress = Math.min(elapsed / duration, 1);
+            doorGroup.rotation.y = initialRotationY + (targetRotationY - initialRotationY) * progress;
+            if (progress < 1) {
+                requestAnimationFrame(animateDoor);
+            } else {
+                doorGroup.userData.doorState = targetState;
+            }
+        }
+        animateDoor();
     }
 }
 function processBlockUpdates() {
     if (blockUpdateQueue.length === 0) return;
-    const {x, y, z} = blockUpdateQueue.shift();
+    const { x, y, z } = blockUpdateQueue.shift();
     const key = `${x},${y},${z}`;
     const block = blocks.get(key);
     if (!block || (block.userData.blockId !== 'water' && block.userData.blockId !== 'sponge')) return;
@@ -302,9 +441,8 @@ function processBlockUpdates() {
         let fluidVolume = block.userData.fluidVolume;
         const isWaterSource = block.userData.isWaterSource;
         let waterSpreadLimit = block.userData.waterSpreadLimit;
-        const keyBelow = `${x},${y-1},${z}`;
+        const keyBelow = `${x},${y - 1},${z}`;
         const blockBelow = blocks.get(keyBelow);
-        // NEW: Check for bedrock before water falls
         if (blockBelow && blockBelow.userData.blockId === 'bedrock') {
             return;
         }
@@ -316,35 +454,35 @@ function processBlockUpdates() {
             }
             if (!isWaterSource) {
                 removeBlock(x, y, z);
-                blockUpdateQueue.push({x, y:y-1, z});
+                blockUpdateQueue.push({ x, y: y - 1, z });
             }
             return;
         }
         if (!blockBelow) {
             if (isWaterSource) {
-                addBlock(x, y-1, z, 'water');
+                addBlock(x, y - 1, z, 'water');
                 const newWater = blocks.get(keyBelow);
                 if (newWater) {
                     newWater.userData.fluidVolume = 0.5;
                     newWater.userData.isWaterSource = false;
                     newWater.userData.waterSpreadLimit = waterSpreadLimit;
-                    blockUpdateQueue.push({x, y:y-1, z});
+                    blockUpdateQueue.push({ x, y: y - 1, z });
                 }
             } else {
                 const nextVolume = fluidVolume;
                 const nextSpread = waterSpreadLimit;
-                removeBlock(x,y,z);
-                addBlock(x, y-1, z, 'water');
+                removeBlock(x, y, z);
+                addBlock(x, y - 1, z, 'water');
                 const newWater = blocks.get(keyBelow);
-                if(newWater){
+                if (newWater) {
                     newWater.userData.fluidVolume = nextVolume;
                     newWater.userData.isWaterSource = false;
                     newWater.userData.waterSpreadLimit = nextSpread;
-                    blockUpdateQueue.push({x, y:y-1, z});
+                    blockUpdateQueue.push({ x, y: y - 1, z });
                 }
             }
         } else {
-            const neighbors = [{x:x+1,y:y,z:z}, {x:x-1,y:y,z:z}, {x:x,y:y,z:z+1}, {x:x,y:y,z:z-1}];
+            const neighbors = [{ x: x + 1, y: y, z: z }, { x: x - 1, y: y, z: z }, { x: x, y: y, z: z + 1 }, { x: x, y: y, z: z - 1 }];
             if (waterSpreadLimit > 0 && blockBelow.userData.blockId !== 'water') {
                 neighbors.forEach(n => {
                     const neighborBlock = blocks.get(`${n.x},${n.y},${n.z}`);
@@ -352,7 +490,6 @@ function processBlockUpdates() {
                         addBlock(n.x, n.y, n.z, 'water');
                         const newWater = blocks.get(`${n.x},${n.y},${n.z}`);
                         if (newWater) {
-                            // NEW: Set new water block spread limit to 0
                             newWater.userData.fluidVolume = 0.5;
                             newWater.userData.isWaterSource = false;
                             newWater.userData.waterSpreadLimit = 0;
@@ -369,25 +506,24 @@ function processBlockUpdates() {
             block.position.y = (y * blockSize) + (blockSize * fluidVolume) / 2 - blockSize * 0.5;
             block.material.opacity = 0.7 + fluidVolume * 0.3;
             if (isWaterSource) {
-                blockUpdateQueue.push({x, y, z});
+                blockUpdateQueue.push({ x, y, z });
             }
         }
     }
-    // Sponge logic
     if (block.userData.blockId === 'sponge') {
-        const toCheck = [{x, y, z}];
+        const toCheck = [{ x, y, z }];
         const checked = new Set([key]);
         const spongeLimit = 65;
         let waterAbsorbed = false;
-        while(toCheck.length > 0 && checked.size < spongeLimit) {
+        while (toCheck.length > 0 && checked.size < spongeLimit) {
             const currentPos = toCheck.shift();
             const neighbors = [
-                {x: currentPos.x + 1, y: currentPos.y, z: currentPos.z},
-                {x: currentPos.x - 1, y: currentPos.y, z: currentPos.z},
-                {x: currentPos.x, y: currentPos.y + 1, z: currentPos.z},
-                {x: currentPos.x, y: currentPos.y - 1, z: currentPos.z},
-                {x: currentPos.x, y: currentPos.y, z: currentPos.z + 1},
-                {x: currentPos.x, y: currentPos.y, z: currentPos.z - 1},
+                { x: currentPos.x + 1, y: currentPos.y, z: currentPos.z },
+                { x: currentPos.x - 1, y: currentPos.y, z: currentPos.z },
+                { x: currentPos.x, y: currentPos.y + 1, z: currentPos.z },
+                { x: currentPos.x, y: currentPos.y - 1, z: currentPos.z },
+                { x: currentPos.x, y: currentPos.y, z: currentPos.z + 1 },
+                { x: currentPos.x, y: currentPos.y, z: currentPos.z - 1 },
             ];
             for (const n of neighbors) {
                 const nKey = `${n.x},${n.y},${n.z}`;
@@ -418,87 +554,148 @@ function createFloor() {
 }
 function animate() {
     requestAnimationFrame(animate);
+
     if (!isInventoryOpen) {
-      processBlockUpdates();
-      if (isControllerConnected) { handleGamepadInput(); }
+        processBlockUpdates();
     }
+
+    if (isControllerConnected) {
+        handleGamepadInput();
+    }
+
     const delta = clock.getDelta();
+
     if (isPlaying) {
-        const skyLimit = playerHeight + 50;
-        if (camera.position.y > skyLimit) {
-            camera.position.y = playerHeight;
-            velocity.y = 0;
+        // --- Water Physics Logic ---
+        let isInWater = false;
+        let playerWaterBox = new THREE.Box3().setFromCenterAndSize(
+            camera.position,
+            new THREE.Vector3(playerRadius, playerHeight, playerRadius)
+        );
+
+        for (const b of allBlocks) {
+            // Check for intersection with water blocks only
+            if (b.userData.blockId === 'water') {
+                const blockBox = new THREE.Box3().setFromObject(b);
+                if (playerWaterBox.intersectsBox(blockBox)) {
+                    isInWater = true;
+                    break;
+                }
+            }
         }
+
+        let currentGravity = gravity;
+        let currentMoveSpeed = moveSpeed;
+
+        if (isInWater) {
+            currentGravity = -0.002; // Reduced gravity for floating
+            currentMoveSpeed = moveSpeed * 0.5; // Halved speed for swimming
+            
+            // If the player presses the jump button (canJump is true) or is generally moving up,
+            // we give an upward velocity.
+            if (canJump || velocity.y > 0) { 
+                velocity.y = 0.05; 
+            } else {
+                // Otherwise, simulate buoyancy, but don't force a rise from the bottom
+                velocity.y += 0.005; 
+            }
+        }
+
+        // Horizontal movement
         const horizontalMovement = new THREE.Vector3();
         if (moveForward) horizontalMovement.z -= 1;
         if (moveBackward) horizontalMovement.z += 1;
         if (moveLeft) horizontalMovement.x -= 1;
         if (moveRight) horizontalMovement.x += 1;
+        
         if (horizontalMovement.length() > 0) {
-            horizontalMovement.normalize().multiplyScalar(moveSpeed * delta);
-            const zSpeed = -horizontalMovement.z;
+            horizontalMovement.normalize().multiplyScalar(currentMoveSpeed * delta);
             const forwardVector = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
             const rightVector = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-            const potentialNewX = camera.position.x + (forwardVector.x * zSpeed + rightVector.x * horizontalMovement.x);
-            const potentialNewZ = camera.position.z + (forwardVector.z * zSpeed + rightVector.z * horizontalMovement.x);
-            let canMoveX = true, canMoveZ = true;
-            const playerBoxX = new THREE.Box3().setFromCenterAndSize(new THREE.Vector3(potentialNewX, camera.position.y, camera.position.z), new THREE.Vector3(playerRadius * 2, playerHeight, playerRadius * 2));
+
+            const desiredDeltaX = (forwardVector.x * -horizontalMovement.z) + (rightVector.x * horizontalMovement.x);
+            const desiredDeltaZ = (forwardVector.z * -horizontalMovement.z) + (rightVector.z * horizontalMovement.x);
+
+            const newPositionX = camera.position.x + desiredDeltaX;
+            const newPositionZ = camera.position.z + desiredDeltaZ;
+
+            const playerBox = new THREE.Box3().setFromCenterAndSize(
+                new THREE.Vector3(newPositionX, camera.position.y, newPositionZ),
+                new THREE.Vector3(playerRadius * 2, playerHeight, playerRadius * 2)
+            );
+
+            let canMoveX = true;
+            let canMoveZ = true;
+
             for (const b of allBlocks) {
-                if (b.userData.blockId === 'water') continue;
-                const collisionMesh = b instanceof THREE.Group ? b.children.find(c => c.userData.isCollisionBlock) : b;
-                if (!collisionMesh) continue;
-                const blockBox = new THREE.Box3().setFromObject(collisionMesh);
-                if (playerBoxX.intersectsBox(blockBox.expandByScalar(-0.01))) { canMoveX = false; break; }
+                const collisionMesh = b instanceof THREE.Group ? b.children.find(c => c.userData.isCollisionBlockPart) || b.children[0] : b;
+                // Exclude water blocks from collision check
+                if (!collisionMesh || !b.userData.isCollisionBlock || b.userData.blockId === 'water') continue;
+                const blockBox = new THREE.Box3().setFromObject(collisionMesh).expandByScalar(-0.01);
+                if (blockBox.max.y > camera.position.y - playerHeight / 2 + 0.1) {
+                     if (playerBox.intersectsBox(blockBox)) {
+                         canMoveX = false;
+                         canMoveZ = false;
+                         break;
+                     }
+                }
             }
-            const playerBoxZ = new THREE.Box3().setFromCenterAndSize(new THREE.Vector3(camera.position.x, camera.position.y, potentialNewZ), new THREE.Vector3(playerRadius * 2, playerHeight, playerRadius * 2));
-            for (const b of allBlocks) {
-                if (b.userData.blockId === 'water') continue;
-                const collisionMesh = b instanceof THREE.Group ? b.children.find(c => c.userData.isCollisionBlock) : b;
-                if (!collisionMesh) continue;
-                const blockBox = new THREE.Box3().setFromObject(collisionMesh);
-                if (playerBoxZ.intersectsBox(blockBox.expandByScalar(-0.01))) { canMoveZ = false; break; }
-            }
-            if (canMoveX) camera.position.x = potentialNewX;
-            if (canMoveZ) camera.position.z = potentialNewZ;
+
+            if (canMoveX) camera.position.x = newPositionX;
+            if (canMoveZ) camera.position.z = newPositionZ;
         }
-        velocity.y += gravity;
-        const futurePositionY = camera.position.y + velocity.y;
-        let verticalCollision = false, lowestCollisionY = -Infinity, highestCollisionY = Infinity;
+
+        // Vertical movement and collision
+        velocity.y += currentGravity;
+        let futurePositionY = camera.position.y + velocity.y;
+        let verticalCollision = false;
+        let lowestCollisionY = -Infinity;
+        let isSponge = false;
+        
         const playerVerticalBox = new THREE.Box3().setFromCenterAndSize(new THREE.Vector3(camera.position.x, futurePositionY, camera.position.z), new THREE.Vector3(playerRadius * 2, playerHeight, playerRadius * 2));
+        
         for (const b of allBlocks) {
-            if (b.userData.blockId === 'water') continue;
-            const collisionMesh = b instanceof THREE.Group ? b.children.find(c => c.userData.isCollisionBlock) : b;
+            const isBlockCollision = b.userData.isCollisionBlock;
+            // Exclude water blocks from vertical collision check
+            if (!isBlockCollision || b.userData.blockId === 'water') continue;
+            const collisionMesh = b instanceof THREE.Group ? b.children.find(c => c.userData.isCollisionBlockPart) || b.children[0] : b;
             if (!collisionMesh) continue;
             const blockBox = new THREE.Box3().setFromObject(collisionMesh).expandByScalar(-0.01);
+
             if (playerVerticalBox.intersectsBox(blockBox)) {
+                if (velocity.y < 0 && blockBox.max.y > lowestCollisionY) {
+                    lowestCollisionY = blockBox.max.y;
+                    isSponge = b.userData.blockId === 'sponge';
+                }
                 verticalCollision = true;
-                if (velocity.y < 0 && blockBox.max.y > lowestCollisionY) lowestCollisionY = blockBox.max.y;
-                if (velocity.y > 0 && blockBox.min.y < highestCollisionY) highestCollisionY = blockBox.min.y;
             }
         }
+
         if (verticalCollision) {
-            if (velocity.y < 0 && lowestCollisionY > -Infinity) {
-                const blockAtFeet = allBlocks.find(b => {
-                    const collisionMesh = b instanceof THREE.Group ? b.children.find(c => c.userData.isCollisionBlock) : b;
-                    if (!collisionMesh) return false;
-                    const blockBox = new THREE.Box3().setFromObject(collisionMesh).expandByScalar(-0.01);
-                    return playerVerticalBox.intersectsBox(blockBox) && Math.abs(blockBox.max.y - lowestCollisionY) < 0.01;
-                });
-                if (blockAtFeet && blockAtFeet.userData.blockId === 'sponge') {
+            if (velocity.y < 0) {
+                camera.position.y = lowestCollisionY + playerHeight / 2;
+                velocity.y = 0;
+                canJump = true;
+                if(isSponge) {
                     velocity.y = jumpPower * 1.5;
                     canJump = false;
-                } else {
-                    camera.position.y = lowestCollisionY + playerHeight / 2;
-                    velocity.y = 0;
-                    canJump = true;
                 }
-            } else if (velocity.y > 0 && highestCollisionY < Infinity) {
-                camera.position.y = highestCollisionY - playerHeight / 2;
+            } else if (velocity.y > 0) {
                 velocity.y = 0;
             }
-        } else { camera.position.y = futurePositionY; canJump = false; }
-        if (camera.position.y < playerHeight / 2) { camera.position.y = playerHeight / 2; velocity.y = 0; canJump = true; }
+        } else {
+            camera.position.y = futurePositionY;
+            canJump = false;
+        }
+
+        // Keep the player from falling through the floor of the world
+        if (camera.position.y < playerHeight / 2) {
+            camera.position.y = playerHeight / 2;
+            velocity.y = 0;
+            canJump = true;
+        }
     }
+
     renderer.render(scene, camera);
 }
 function initDragAndDrop() {
@@ -548,7 +745,7 @@ function initDragAndDrop() {
             }
             document.body.removeChild(ghostSlot);
             ghostSlot = null;
-            if(touchStartSlot) touchStartSlot.classList.remove('dragging');
+            if (touchStartSlot) touchStartSlot.classList.remove('dragging');
             touchStartSlot = null;
         }
     });
@@ -556,14 +753,13 @@ function initDragAndDrop() {
         if (!source || !target) return;
         const sourceBlockId = source.dataset.blockId;
         const targetBlockId = target.dataset.blockId;
-        // Swap block IDs and update styles
         source.dataset.blockId = targetBlockId;
         let styles = getSlotBackgroundStyle(targetBlockId);
-        for(const s in source.style) source.style[s] = '';
+        for (const s in source.style) source.style[s] = '';
         for (const style in styles) source.style[style] = styles[style];
         target.dataset.blockId = sourceBlockId;
         styles = getSlotBackgroundStyle(sourceBlockId);
-        for(const s in target.style) target.style[s] = '';
+        for (const s in target.style) target.style[s] = '';
         for (const style in styles) target.style[style] = styles[style];
         updateActiveHotbarBlock();
     };
@@ -581,57 +777,82 @@ function updateActiveHotbarBlock() {
     if (activeSlot) { selectBlock(activeSlot); }
 }
 function handleGamepadInput() {
-    if (!isControllerConnected || !isPlaying) return;
+    if (!isControllerConnected) return;
     const gamepad = navigator.getGamepads()[0];
     if (!gamepad) return;
-    const rightStickX = gamepad.axes[2], rightStickY = gamepad.axes[3];
-    if (Math.abs(rightStickX) > joystickDeadzone) {
-        const euler = new THREE.Euler(0, 0, 0, 'YXZ');
-        euler.setFromQuaternion(camera.quaternion);
-        euler.y -= rightStickX * controllerSensitivity;
-        camera.quaternion.setFromEuler(euler);
-    }
-    if (Math.abs(rightStickY) > joystickDeadzone) {
-        const euler = new THREE.Euler(0, 0, 0, 'YXZ');
-        euler.setFromQuaternion(camera.quaternion);
-        euler.x -= rightStickY * controllerSensitivity;
-        const pi_half = Math.PI / 2 - 0.001;
-        euler.x = Math.max(-pi_half, Math.min(pi_half, euler.x));
-        camera.quaternion.setFromEuler(euler);
-    }
-    const leftStickX = gamepad.axes[0], leftStickY = gamepad.axes[1];
-    moveForward = leftStickY < -joystickDeadzone;
-    moveBackward = leftStickY > joystickDeadzone;
-    moveLeft = leftStickX < -joystickDeadzone;
-    moveRight = leftStickY > joystickDeadzone;
-    if (gamepad.buttons[0].pressed && canJump) { velocity.y = jumpPower; canJump = false; }
-    const now = Date.now();
-    if (now - lastBumperPressTime > bumperDelay) {
-        let currentIndex = hotbarSlots.findIndex(slot => slot.classList.contains('active'));
-        if (gamepad.buttons[5].pressed) {
-            currentIndex = (currentIndex + 1) % hotbarSlots.length;
-            selectBlock(hotbarSlots[currentIndex]);
-            lastBumperPressTime = now;
-        } else if (gamepad.buttons[4].pressed) {
-            currentIndex = (currentIndex - 1 + hotbarSlots.length) % hotbarSlots.length;
-            selectBlock(hotbarSlots[currentIndex]);
-            lastBumperPressTime = now;
+    if (isPlaying) {
+        const rightStickX = gamepad.axes[2], rightStickY = gamepad.axes[3];
+        if (Math.abs(rightStickX) > joystickDeadzone) {
+            const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+            euler.setFromQuaternion(camera.quaternion);
+            euler.y -= rightStickX * controllerSensitivity;
+            camera.quaternion.setFromEuler(euler);
         }
+        if (Math.abs(rightStickY) > joystickDeadzone) {
+            const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+            euler.setFromQuaternion(camera.quaternion);
+            euler.x -= rightStickY * controllerSensitivity;
+            const pi_half = Math.PI / 2 - 0.001;
+            euler.x = Math.max(-pi_half, Math.min(pi_half, euler.x));
+            camera.quaternion.setFromEuler(euler);
+        }
+        const leftStickX = gamepad.axes[0], leftStickY = gamepad.axes[1];
+        moveForward = leftStickY < -joystickDeadzone;
+        moveBackward = leftStickY > joystickDeadzone;
+        moveLeft = leftStickX < -joystickDeadzone;
+        moveRight = leftStickX > joystickDeadzone;
+        if (gamepad.buttons[0].pressed && canJump) { velocity.y = jumpPower; canJump = false; }
+        const now = Date.now();
+        if (now - lastBumperPressTime > bumperDelay) {
+            let currentIndex = hotbarSlots.findIndex(slot => slot.classList.contains('active'));
+            if (gamepad.buttons[5].pressed) {
+                currentIndex = (currentIndex + 1) % hotbarSlots.length;
+                selectBlock(hotbarSlots[currentIndex]);
+                lastBumperPressTime = now;
+            } else if (gamepad.buttons[4].pressed) {
+                currentIndex = (currentIndex - 1 + hotbarSlots.length) % hotbarSlots.length;
+                selectBlock(hotbarSlots[currentIndex]);
+                lastBumperPressTime = now;
+            }
+        }
+        const rtPressed = gamepad.buttons[7].pressed;
+        if (rtPressed && !rtPressedLastFrame) { destroyBlock(); }
+        rtPressedLastFrame = rtPressed;
+        const ltPressed = gamepad.buttons[6].pressed;
+        if (ltPressed && !ltPressedLastFrame) { 
+            interactOrPlaceBlock();
+        }
+        ltPressedLastFrame = ltPressed;
     }
-    const rtPressed = gamepad.buttons[7].pressed;
-    if (rtPressed && !rtPressedLastFrame) { destroyBlock(); }
-    rtPressedLastFrame = rtPressed;
-    const ltPressed = gamepad.buttons[6].pressed;
-    if (ltPressed && !ltPressedLastFrame) { placeBlock(); }
-    ltPressedLastFrame = ltPressed;
+    const xButtonPressed = gamepad.buttons[2].pressed;
+    if (xButtonPressed && !xPressedLastFrame) {
+        debouncedToggleInventory();
+    }
+    xPressedLastFrame = xButtonPressed;
 }
-function placeBlock() {
-    // For pointer lock, raycaster direction is based on camera's direction
+// New function to handle both interaction and placing blocks
+function interactOrPlaceBlock() {
     raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
     const intersects = raycaster.intersectObjects(allBlocks, true);
     if (intersects.length > 0) {
         const intersection = intersects[0];
         const blockObject = intersection.object.parent instanceof THREE.Group ? intersection.object.parent : intersection.object;
+        
+        if (blockObject.userData.blockId === 'door') {
+            debouncedToggleDoor(blockObject.userData.originalX, blockObject.userData.originalY, blockObject.userData.originalZ);
+        } else {
+            placeBlock();
+        }
+    } else {
+        placeBlock();
+    }
+}
+function placeBlock() {
+    raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+    const intersects = raycaster.intersectObjects(allBlocks, true);
+    if (intersects.length > 0) {
+        const intersection = intersects[0];
+        const blockObject = intersection.object.parent instanceof THREE.Group && intersection.object.parent.userData.blockId ? intersection.object.parent : intersection.object;
         const blockPosition = blockObject.position;
         const normal = intersection.face.normal;
         let newBlockId = selectedBlockId;
@@ -641,17 +862,23 @@ function placeBlock() {
         const playerBox = new THREE.Box3().setFromCenterAndSize(camera.position, new THREE.Vector3(playerRadius * 2, playerHeight, playerRadius * 2));
         const potentialBlockBox = new THREE.Box3().setFromCenterAndSize(new THREE.Vector3(newBlockX, newBlockY, newBlockZ), new THREE.Vector3(blockSize, blockSize, blockSize));
         if (!playerBox.intersectsBox(potentialBlockBox)) {
+            if (newBlockId === 'door') {
+                const topBlockKey = `${newBlockX},${newBlockY + 1},${newBlockZ}`;
+                if (blocks.has(topBlockKey)) {
+                    console.warn(`Cannot place door: space above (${newBlockX},${newBlockY+1},${newBlockZ}) is occupied.`);
+                    return;
+                }
+            }
             addBlock(newBlockX, newBlockY, newBlockZ, newBlockId);
         }
     }
 }
 function destroyBlock() {
-    // For pointer lock, raycaster direction is based on camera's direction
     raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
     const intersects = raycaster.intersectObjects(allBlocks, true);
     if (intersects.length > 0) {
         const intersection = intersects[0];
-        const blockObject = intersection.object.parent instanceof THREE.Group ? intersection.object.parent : intersection.object;
+        const blockObject = intersection.object.parent instanceof THREE.Group && intersection.object.parent.userData.blockId ? intersection.object.parent : intersection.object;
         const blockPosition = blockObject.position;
         removeBlock(blockPosition.x / blockSize, blockPosition.y / blockSize, blockPosition.z / blockSize);
     }
@@ -667,7 +894,6 @@ function initTouchControls() {
     document.getElementById('build-btn').addEventListener('touchstart', (e) => { e.stopPropagation(); onBuildTouch(e); });
     document.getElementById('esc-btn').addEventListener('touchstart', (e) => { e.stopPropagation(); onEscTouch(e); });
 }
-// New variables to track touch identifiers
 let joystickTouchID = -1;
 let cameraTouchID = -1;
 function onMasterTouchStart(event) {
@@ -683,12 +909,10 @@ function onMasterTouchStart(event) {
     for (let i = 0; i < event.changedTouches.length; i++) {
         const touch = event.changedTouches[i];
         if (touch.clientX < window.innerWidth / 2 && joystickTouchID === -1) {
-            // This touch is for the joystick
             joystickX = touch.clientX;
             joystickY = touch.clientY;
             joystickTouchID = touch.identifier;
         } else if (touch.clientX >= window.innerWidth / 2 && cameraTouchID === -1) {
-            // This touch is for the camera
             touchCameraX = touch.clientX;
             touchCameraY = touch.clientY;
             cameraTouchID = touch.identifier;
@@ -748,7 +972,6 @@ function onJumpTouch(event) { if (canJump && isPlaying) { velocity.y = jumpPower
 function onBuildTouch(event) { if (isPlaying) { placeBlock(); } }
 function onMouseDownTouch(event) { if (isPlaying) { destroyBlock(); } }
 function onEscTouch(event) {
-    // Only needed for mobile/touch
     document.getElementById('in-game-ui').style.display = 'none';
     document.getElementById('info').style.display = 'block';
     document.getElementById('touch-controls').style.display = 'none';
@@ -761,10 +984,16 @@ function createPlayerArm() {
     playerArm = new THREE.Mesh(armGeometry, armMaterial);
     playerArm.position.set(0.4, -0.6, -0.6);
     const heldBlockGeometry = new THREE.BoxGeometry(blockSize, blockSize, blockSize);
-    const initialMaterial = materials[selectedBlockId.replace('_dirt', '')] || materials.dirt;
-    heldBlock = new THREE.Mesh(heldBlockGeometry, initialMaterial);
-    heldBlock.position.set(0, 0.4, -0.8);
-    playerArm.add(heldBlock);
+    let initialMaterial = materials[selectedBlockId] || materials.dirt;
+    if (selectedBlockId === 'door') {
+        initialMaterial = materials.door_wood;
+    }
+    if (heldBlock) { heldBlock.material = initialMaterial; }
+    if (!heldBlock) {
+      heldBlock = new THREE.Mesh(heldBlockGeometry, initialMaterial);
+      heldBlock.position.set(0, 0.4, -0.8);
+      playerArm.add(heldBlock);
+    }
     camera.add(playerArm);
 }
 function removeAllBlocks() {
@@ -774,13 +1003,13 @@ function removeAllBlocks() {
 }
 function saveWorld() {
     const savedBlocks = [];
-    for (const [key, mesh] of blocks.entries()) {
-        const blockToSave = mesh instanceof THREE.Group ? mesh : mesh;
-        if (blockToSave && blockToSave.userData.blockId) {
+    for (const [key, block] of blocks.entries()) {
+        if (block.userData.blockId && !savedBlocks.some(b => b.x === block.userData.originalX && b.y === block.userData.originalY && b.z === block.userData.originalZ && b.blockId === 'door' && block.userData.blockId === 'door')) {
+            const blockToSave = block instanceof THREE.Group ? block : block;
             const blockData = {
-                x: blockToSave.position.x / blockSize,
-                y: blockToSave.position.y / blockSize,
-                z: blockToSave.position.z / blockSize,
+                x: blockToSave.userData.originalX !== undefined ? blockToSave.userData.originalX : blockToSave.position.x / blockSize,
+                y: blockToSave.userData.originalY !== undefined ? blockToSave.userData.originalY : blockToSave.position.y / blockSize,
+                z: blockToSave.userData.originalZ !== undefined ? blockToSave.userData.originalZ : blockToSave.position.z / blockSize,
                 blockId: blockToSave.userData.blockId
             };
             if (blockToSave.userData.blockId === 'water') {
@@ -788,11 +1017,16 @@ function saveWorld() {
                 blockData.isWaterSource = blockToSave.userData.isWaterSource;
                 blockData.waterSpreadLimit = blockToSave.userData.waterSpreadLimit;
             }
+            if (blockToSave.userData.blockId === 'door') {
+                blockData.doorState = blockToSave.userData.doorState;
+                blockData.hinge = blockToSave.userData.hinge;
+                blockData.rotation = blockToSave.rotation.y;
+            }
             savedBlocks.push(blockData);
         }
     }
     localStorage.setItem('savedWorld', JSON.stringify(savedBlocks));
-    alert('World saved!');
+    showMessageBox('World saved!', 'Success');
 }
 function loadWorld() {
     const savedWorld = localStorage.getItem('savedWorld');
@@ -800,43 +1034,112 @@ function loadWorld() {
         removeAllBlocks();
         const blocksToLoad = JSON.parse(savedWorld);
         for (const blockData of blocksToLoad) {
-            addBlock(blockData.x, blockData.y, blockData.z, blockData.blockId);
+            addBlock(blockData.x, blockData.y, blockData.z, blockData.blockId, true, blockData.doorState, blockData.hinge);
             const loadedBlock = blocks.get(`${blockData.x},${blockData.y},${blockData.z}`);
-            if (loadedBlock && blockData.blockId === 'water') {
-                loadedBlock.userData.fluidVolume = blockData.fluidVolume;
-                loadedBlock.userData.isWaterSource = blockData.isWaterSource;
-                loadedBlock.userData.waterSpreadLimit = blockData.waterSpreadLimit;
-                loadedBlock.scale.y = loadedBlock.userData.fluidVolume;
-                loadedBlock.position.y = (blockData.y * blockSize) + (blockSize * loadedBlock.userData.fluidVolume) / 2 - blockSize * 0.5;
-                loadedBlock.material.opacity = 0.7 + loadedBlock.userData.fluidVolume * 0.3;
+            if (loadedBlock) {
+                if (blockData.blockId === 'water') {
+                    loadedBlock.userData.fluidVolume = blockData.fluidVolume;
+                    loadedBlock.userData.isWaterSource = blockData.isWaterSource;
+                    loadedBlock.userData.waterSpreadLimit = blockData.waterSpreadLimit;
+                    loadedBlock.scale.y = loadedBlock.userData.fluidVolume;
+                    loadedBlock.position.y = (blockData.y * blockSize) + (blockSize * loadedBlock.userData.fluidVolume) / 2 - blockSize * 0.5;
+                    loadedBlock.material.opacity = 0.7 + loadedBlock.userData.fluidVolume * 0.3;
+                }
+                if (blockData.blockId === 'door') {
+                    loadedBlock.userData.doorState = blockData.doorState;
+                    loadedBlock.userData.isCollisionBlock = true;
+                    if (blockData.rotation !== undefined) {
+                         loadedBlock.rotation.y = blockData.rotation;
+                    }
+                }
             }
         }
-        alert('World loaded!');
+        showMessageBox('World loaded!', 'Success');
     } else {
-        alert('No saved world found!');
+        showMessageBox('No saved world found!', 'Info');
     }
+}
+function showMessageBox(message, type) {
+    const messageBox = document.createElement('div');
+    messageBox.id = 'custom-message-box';
+    messageBox.style.cssText = `
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background-color: rgba(0, 0, 0, 0.8);
+        color: white;
+        padding: 20px;
+        border-radius: 10px;
+        z-index: 1000;
+        font-size: 1.5em;
+        text-align: center;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+        border: 2px solid ${type === 'Success' ? '#32cd32' : type === 'Info' ? '#1e90ff' : '#ff4500'};
+    `;
+    messageBox.textContent = message;
+    document.body.appendChild(messageBox);
+    setTimeout(() => {
+        messageBox.remove();
+    }, 2000);
 }
 function onMouseDown(event) {
     if (controls.isLocked) {
-        if (event.button === 0) { destroyBlock(); }
-        else if (event.button === 2) { placeBlock(); }
+        raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+        const intersects = raycaster.intersectObjects(allBlocks, true);
+        if (intersects.length > 0) {
+            const intersection = intersects[0];
+            const blockObject = intersection.object.parent instanceof THREE.Group && intersection.object.parent.userData.blockId ? intersection.object.parent : intersection.object;
+            const blockPosition = blockObject.position;
+            const blockX = blockPosition.x / blockSize;
+            const blockY = blockPosition.y / blockSize;
+            const blockZ = blockPosition.z / blockSize;
+            if (event.button === 0) {
+                destroyBlock();
+            } else if (event.button === 2) {
+                if (blockObject.userData.blockId === 'door') {
+                    debouncedToggleDoor(blockObject.userData.originalX, blockObject.userData.originalY, blockObject.userData.originalZ);
+                } else {
+                    placeBlock();
+                }
+            }
+        } else {
+            if (event.button === 2) {
+                placeBlock();
+            }
+        }
     }
 }
 function onKeyDown(event) {
     switch (event.key.toLowerCase()) {
         case 'escape':
-          if(isInventoryOpen){
-            toggleInventory();
-          } else if (controls.isLocked) {
-            controls.unlock();
-          }
-          break;
+            if (isInventoryOpen) {
+                toggleInventory();
+            } else if (controls.isLocked) {
+                controls.unlock();
+            }
+            break;
         case 'w': moveForward = true; break;
         case 's': moveBackward = true; break;
         case 'a': moveLeft = true; break;
         case 'd': moveRight = true; break;
         case ' ': if (canJump) { velocity.y = jumpPower; canJump = false; } break;
-        case '1': case '2': case '3': case '4': case '5': case '6': case '7': case '8': case '9': case '0':
+        case 'e':
+            if (isPlaying && !ePressedLastFrame) {
+                debouncedToggleInventory();
+            }
+            ePressedLastFrame = true;
+            break;
+        case '1':
+        case '2':
+        case '3':
+        case '4':
+        case '5':
+        case '6':
+        case '7':
+        case '8':
+        case '9':
+        case '0':
             const index = event.key === '0' ? 9 : parseInt(event.key) - 1;
             if (hotbarSlots[index]) { selectBlock(hotbarSlots[index]); }
             break;
@@ -848,7 +1151,7 @@ function onKeyUp(event) {
         case 's': moveBackward = false; break;
         case 'a': moveLeft = false; break;
         case 'd': moveRight = false; break;
-        case 'e': if (!isInventoryOpen) debouncedToggleInventory(); break;
+        case 'e': ePressedLastFrame = false; break;
     }
 }
 function onWindowResize() {
@@ -865,7 +1168,19 @@ function selectBlock(slotElement) {
     document.querySelectorAll('#hotbar .slot').forEach(slot => slot.classList.remove('active'));
     slotElement.classList.add('active');
     selectedBlockId = slotElement.dataset.blockId;
-    let previewMaterial = materials[selectedBlockId.replace('_dirt', '')] || materials.dirt;
+    let previewMaterial;
+    if (selectedBlockId === 'wood') {
+        previewMaterial = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createWoodGrainTexture('#5c4033', '#4a332a')) });
+    } else if (selectedBlockId === 'dirt') {
+        previewMaterial = new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#8b4513', ['#9c5726', '#6b3510'])) });
+    } else if (selectedBlockId === 'glass') {
+        previewMaterial = new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(createCanvasTexture('#87ceeb', ['#8ed1ef', '#83c9e6'])), transparent: true, opacity: 0.75 });
+    } else if (selectedBlockId === 'door') {
+        previewMaterial = materials.door_wood;
+    }
+    else {
+        previewMaterial = materials[selectedBlockId] || materials.dirt;
+    }
     if (heldBlock) { heldBlock.material = previewMaterial; }
 }
 hotbarSlots.forEach(slot => {
